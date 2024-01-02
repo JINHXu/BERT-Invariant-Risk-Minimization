@@ -8,13 +8,15 @@ from torch.utils.data import DataLoader
 from typing import Callable, Any, Iterator
 import numpy as np
 from pathlib import Path
+from transformers import AutoModelForSequenceClassification, BertModel
 from torch.nn import CrossEntropyLoss
 from torch.autograd import grad
 from utils import *
 from typing import List
 from torch.utils.tensorboard import SummaryWriter
-# from pytorch_memlab import MemReporter
-from sklearn.metrics import precision_score, recall_score, confusion_matrix
+#from pytorch_memlab import MemReporter
+from sklearn.metrics import precision_score, recall_score, confusion_matrix, f1_score
+from settings import NUM_LABELS, labels_int_to_string
 
 
 class Trainer(abc.ABC):
@@ -132,6 +134,9 @@ class Trainer(abc.ABC):
 
         num_steps = warm_up_steps + irm_steps
 
+        # label_int_to_str = dl_train[0].dataset.label_int_to_str
+        label_int_to_str = {0: 'neutral', 1:'hate'}
+
         while actual_num_steps < num_steps:
             step = actual_num_steps
             save_checkpoint = False
@@ -166,7 +171,8 @@ class Trainer(abc.ABC):
             for i, train_accuracy_per_env_i in enumerate(train_accuracy_per_env):
                 train_accuracy_per_env_i.append(np.mean(train_result.accuracies_per_env[i]).item())
 
-            tensorboard_add_result(writer, train_result, actual_num_steps, 'train')
+            tensorboard_add_result(writer, train_result, label_int_to_str, actual_num_steps, 'train')
+            # tensorboard_add_result(writer, train_result, actual_num_steps, 'train')
             writer.add_scalar('warm_up/train', 1 if actual_num_steps < warm_up_steps else 0, actual_num_steps)
             writer.add_scalar('lr/train', self.optimizer.param_groups[0]['lr'], actual_num_steps)
 
@@ -185,7 +191,8 @@ class Trainer(abc.ABC):
             for i, test_accuracy_per_env_i in enumerate(test_accuracy_per_env):
                 test_accuracy_per_env_i.append(np.mean(test_result.accuracies_per_env[i]).item())
 
-            tensorboard_add_result(writer, test_result, actual_num_steps, 'val')
+            tensorboard_add_result(writer, test_result, label_int_to_str, actual_num_steps, 'val')
+            # tensorboard_add_result(writer, test_result, actual_num_steps, 'val')
 
             # val OOD
             if dl_test_ood is not None:
@@ -203,13 +210,19 @@ class Trainer(abc.ABC):
                 for i, ood_test_accuracy_per_env_i in enumerate(test_accuracy_per_env_ood):
                     ood_test_accuracy_per_env_i.append(np.mean(test_result_ood.accuracies_per_env[i]).item())
 
-                tensorboard_add_result(writer, test_result_ood, actual_num_steps, 'val_ood')
+                tensorboard_add_result(writer, test_result_ood, label_int_to_str, actual_num_steps, 'val_ood')
+                # tensorboard_add_result(writer, test_result_ood, actual_num_steps, 'val_ood')
             # </editor-fold>
 
             # <editor-fold desc="early stopping">
-            loss_increase = test_loss[-1] >= best_loss
-            error_overfit = train_error[-1] < best_train_error and test_error[-1] >= best_test_error
-            if early_stopping and (loss_increase or error_overfit):
+            if max([warm_up_reg, irm_reg]) > 0.0 and actual_num_steps >= (warm_up_steps - 1):
+                loss_increase = (test_loss[-1] - best_loss) / best_loss >= 0.2
+                error_overfit = train_error[-1] < best_train_error and test_error[-1] >= best_test_error
+                early_stopping_flag = loss_increase or error_overfit
+            else:
+                loss_increase = (test_loss[-1] - best_loss) / best_loss >= 0.1
+                early_stopping_flag = loss_increase
+            if early_stopping and early_stopping_flag:
                 steps_without_improvement += 1
                 if steps_without_improvement >= early_stopping:
                     if actual_num_steps < warm_up_steps:
@@ -264,7 +277,10 @@ class Trainer(abc.ABC):
                                    irm_reg=irm_reg,
                                    optimizer_state_dict=self.optimizer.state_dict(),
                                    scheduler_state_dict=self.scheduler.state_dict() if self.scheduler is not None else None,
-                                   model_state_dict=self.model.state_dict()
+                                   model_state_dict=self.model.state_dict(),
+                                #    # warning
+                                #    use_reentrant = True
+                                #    # gradient_checkpointing_kwargs={"use_reentrant": False}
                                    )
                 torch.save(saved_state, checkpoint_filename)
                 print(f'*** Saved checkpoint {checkpoint_filename} '
@@ -274,19 +290,17 @@ class Trainer(abc.ABC):
                 post_epoch_fn(step, train_result, test_result, verbose)
 
         ans_warm_up = actual_num_warm_up_steps if actual_num_warm_up_steps is not None else warm_up_steps
-        return FitResult(num_warm_up_steps=ans_warm_up, num_steps=actual_num_steps - (warm_up_steps - ans_warm_up),
+        return FitResult(num_warm_up_steps=ans_warm_up, num_steps=actual_num_steps-(warm_up_steps - ans_warm_up),
                          train_loss=train_loss, train_error=train_error, train_penalty=train_penalty,
                          train_acc=train_acc,
                          test_loss=test_loss, test_error=test_error, test_penalty=test_penalty, test_acc=test_acc,
                          test_loss_ood=test_loss_ood, test_error_ood=test_error_ood, test_penalty_ood=test_penalty_ood,
                          test_acc_ood=test_acc_ood,
-                         # per env
+                         #per env
                          train_error_per_env=train_error_per_env, train_penalty_per_env=train_penalty_per_env,
                          train_acc_per_env=train_accuracy_per_env,
-                         test_error_per_env=test_error_per_env, test_penalty_per_env=test_penalty_per_env,
-                         test_acc_per_env=test_accuracy_per_env,
-                         test_error_ood_per_env=test_error_per_env_ood,
-                         test_penalty_ood_per_env=test_penalty_per_env_ood,
+                         test_error_per_env=test_error_per_env, test_penalty_per_env=test_penalty_per_env, test_acc_per_env=test_accuracy_per_env,
+                         test_error_ood_per_env=test_error_per_env_ood, test_penalty_ood_per_env=test_penalty_per_env_ood,
                          test_acc_ood_per_env=test_accuracy_per_env_ood
                          )
 
@@ -296,13 +310,21 @@ class Trainer(abc.ABC):
         test_epoch_result = self.test_epoch(dl_test_iter, reg, verbose=False)
         test_epoch_loss = torch.tensor(test_epoch_result.losses).mean().item()
         test_epoch_acc = test_epoch_result.accuracy
-        test_epoch_cm = test_epoch_result.cm
-
+        y_true, y_pred = test_epoch_result.y_true, test_epoch_result.y_pred
+        test_f1_macro = f1_score(y_true, y_pred, average='macro')
+        print(f'Macro F1 score: {test_f1_macro}')
+        # rep = classification_report(y_true, y_pred, output_dict=True,
+        #                             target_names=['neutral', 'hate'])
+        rep = classification_report(y_true, y_pred)
+        print(rep)
+                                    # target_names=[dl_test[0].dataset.label_int_to_str(x) for x in range(self.num_labels)])
         if test_epoch_result.pred_prob:
-            return TestResult(loss=test_epoch_loss, accuracy=test_epoch_acc, cm=test_epoch_cm,
+            return TestResult(test_epoch_loss, test_epoch_acc,
+                              f1_macro=test_f1_macro, classification_report=rep,
                               pred_prob=test_epoch_result.pred_prob)
         else:
-            return TestResult(loss=test_epoch_loss, accuracy=test_epoch_acc, cm=test_epoch_cm)
+            return TestResult(test_epoch_loss, test_epoch_acc,
+                              f1_macro=test_f1_macro, classification_report=rep)
 
     def train_epoch(self, dl_train: Iterator, reg, **kw) -> EpochResult:
         """
@@ -368,6 +390,7 @@ class Trainer(abc.ABC):
         errors_per_env, penalties_per_env = [], []
         pred_prob = []
         accuracies, accuracies_per_env = [], []
+        y_gt_epoch, y_pred_epoch = [], []
         cm = None
 
         if max_batches is None:
@@ -394,20 +417,20 @@ class Trainer(abc.ABC):
                     pbar.set_description(f'{pbar_name} ({batch_res.loss:.3f})')
                     pbar.update()
 
-                    losses.append(batch_res.loss / num_envs)
-                    errors.append(sum(batch_res.error) / num_envs)
-                    errors_per_env.append(batch_res.error)
-                    penalties.append(sum(batch_res.penalty) / num_envs)
-                    penalties_per_env.append(batch_res.penalty)
-                    accuracies.append(np.mean(100. * np.array(batch_res.num_correct) / np.array(
-                        num_samples)).tolist())  # list of len #batches
-                    accuracies_per_env.append((100. * np.array(batch_res.num_correct) / np.array(
-                        num_samples)).tolist())  # list of lists: #batches x #envs
+                    losses.append(batch_res.loss / num_envs)  # list of len #batches
+                    errors.append(sum(batch_res.error) / num_envs)  # list of len #batches
+                    errors_per_env.append(batch_res.error)  # list of lists: #batches x #envs
+                    penalties.append(sum(batch_res.penalty) / num_envs)  # list of len #batches
+                    penalties_per_env.append(batch_res.penalty)  # list of lists: #batches x #envs
+                    accuracies.append(np.mean(100. * np.array(batch_res.num_correct) / np.array(num_samples)).tolist())  # list of len #batches
+                    accuracies_per_env.append((100. * np.array(batch_res.num_correct) / np.array(num_samples)).tolist())  # list of lists: #batches x #envs
 
                     if batch_res.pred_prob is not None:
-                        pred_prob += batch_res.pred_prob  # list of lists : num_samples x num_labels
+                        pred_prob += batch_res.pred_prob
 
                     y_gt, y_pred = torch.tensor(batch_res.gt), torch.tensor(batch_res.pred)
+                    y_gt_epoch += y_gt
+                    y_pred_epoch += y_pred
                     if cm is None:
                         with wrap_confusion_matrix(num_labels, y_gt, y_pred) as padded_inputs:
                             cm = confusion_matrix(padded_inputs[0], padded_inputs[1], sample_weight=padded_inputs[2])
@@ -434,25 +457,27 @@ class Trainer(abc.ABC):
             return EpochResult(losses=losses, errors=errors, penalties=penalties,
                                errors_per_env=errors_per_env, penalties_per_env=penalties_per_env,
                                accuracy=accuracy, accuracies_per_env=accuracies_per_env,
+                               y_true=y_gt_epoch, y_pred=y_pred_epoch,
                                cm=np.around(100.0 * cm / cm.sum(), 2), pred_prob=pred_prob)
         else:
             return EpochResult(losses=losses, errors=errors, penalties=penalties,
                                errors_per_env=errors_per_env, penalties_per_env=penalties_per_env,
                                accuracy=accuracy, accuracies_per_env=accuracies_per_env,
+                               y_true=y_gt_epoch, y_pred=y_pred_epoch,
                                cm=np.around(100.0 * cm / cm.sum(), 2))
 
-
 class IRMTrainer(Trainer):
-    def __init__(self, model, num_labels, tokenizer, optimizer=None, scheduler=None, device='cpu'):
+    def __init__(self, model, num_labels, tokenizer, weights=None, optimizer=None, scheduler=None, device='cpu'):
         super().__init__(model, num_labels, optimizer, scheduler, device)
         self.tokenizer = tokenizer
         self.dummy_classifier = torch.nn.Parameter(torch.ones(1, self.num_labels)).to(self.device)
+        self.loss_func = CrossEntropyLoss(weight=weights)
 
     def train_batch(self, batch, reg) -> BatchResult:
         self.optimizer.zero_grad()
         error_item, penalty_item, loss_item, num_correct = [], [], 0.0, []
         pred_list, gt_list = [], []
-        loss_func = CrossEntropyLoss()
+        loss_func = self.loss_func
 
         for batch_e in batch:
             x, y = batch_e
@@ -489,13 +514,12 @@ class IRMTrainer(Trainer):
         if self.scheduler is not None:
             self.scheduler.step()
 
-        return BatchResult(loss=loss_item, error=error_item, penalty=penalty_item, num_correct=num_correct,
-                           pred=pred_list, gt=gt_list)
+        return BatchResult(loss=loss_item, error=error_item, penalty=penalty_item, num_correct=num_correct, pred=pred_list, gt=gt_list)
 
     def test_batch(self, batch, reg) -> BatchResult:
         error_item, penalty_item, loss_item, num_correct = [], [], 0.0, []
-        pred_list, gt_list, predicted_prob = [], [], []
-        loss_func = CrossEntropyLoss()
+        pred_list, gt_list = [], []
+        loss_func = self.loss_func
 
         for batch_e in batch:
             with torch.no_grad():
@@ -523,11 +547,8 @@ class IRMTrainer(Trainer):
             pred = torch.argmax(logits.to('cpu'), dim=1)
             gt = y.detach().to('cpu')
             num_correct.append(torch.sum(gt == pred).item())
-            pred_softmax = torch.nn.functional.softmax(logits.detach().to('cpu'), -1)
-            predicted_prob += pred_softmax.tolist()  # list of lists,each sublist is the predicted probs for that sample
             pred_list += pred.tolist()
             gt_list += gt.tolist()
             del loss, outputs, error_e, error, penalty, error_for_penalty, logits, y
 
-        return BatchResult(loss=loss_item, error=error_item, penalty=penalty_item, num_correct=num_correct,
-                           pred=pred_list, gt=gt_list, pred_prob=predicted_prob)
+        return BatchResult(loss=loss_item, error=error_item, penalty=penalty_item, num_correct=num_correct, pred=pred_list, gt=gt_list)

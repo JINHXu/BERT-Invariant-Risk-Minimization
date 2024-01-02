@@ -1,6 +1,5 @@
-from dataset_utils import create_dataset# , BasicDataset
+from dataset_utils import create_datasets# , BasicDataset
 import settings
-from data_utils import datasets_config
 from utils import calc_steps_params # , general_cm_to_fig, cm_to_fig, to_tuple
 from torch.utils.data import DataLoader, SequentialSampler
 from torch.optim import AdamW, SGD
@@ -52,35 +51,21 @@ def run_irm(out_dir='.', dataset='HatEval', num_labels=2, pretrained_model='bert
 
     rng = np.random.RandomState(seed)
 
-    # file paths
-    ethos_train_path = '/content/ethos_train.txt'
-    ethos_val_path = '/content/ethos_val.txt'
-    davidson_train_path = '/content/davidson_train.txt'
-    davidson_val_path = '/content/davidson_val.txt'
-    val_ood_path = '/content/val_ood.txt'
+    ethos_train = create_datasets(ethos_train_path)
+    davidson_train = create_datasets(davidson_train_path)
     
-    label_str_to_int = datasets_config[dataset]['label_str_to_int']
-    label_int_to_str = datasets_config[dataset]['label_int_to_str']
-    fields = datasets_config[dataset]['fields']
-    field_indices = [fields.index(field_name) for field_name in ['sentence', 'gold_label']]
-  
-    # create datasets
-    ethos_train = create_datasets(ethos_train_path, field_indices, label_str_to_int, label_int_to_str)
-    davidson_train = create_datasets(davidson_train_path, field_indices, label_str_to_int, label_int_to_str)
+    ethos_val = create_datasets(ethos_val_path)
+    davidson_val = create_datasets(davidson_val_path)
     
-    ethos_val = create_datasets(ethos_val_path, field_indices, label_str_to_int, label_int_to_str)
-    davidson_val = create_datasets(davidson_val_path, field_indices, label_str_to_int, label_int_to_str)
-    
-    val_ood = create_datasets(val_ood_path, field_indices, label_str_to_int, label_int_to_str)
+    val_ood = create_datasets(val_ood_path)
     
     ds_train = ethos_train + davidson_train
     ds_val = ethos_val+davidson_val
     ds_val_ood = val_ood
-
+    
     dl_train = [DataLoader(env, batch_size=bs_train, shuffle=True) for env in ds_train]
     dl_val = [DataLoader(env, batch_size=bs_val) for env in ds_val]
     dl_val_ood = [DataLoader(env, batch_size=bs_val) for env in ds_val_ood]
-
 
     batches_per_step, warm_up_steps, steps = calc_steps_params(dl_train, eval_every_x_epoch, warm_up_epochs, epochs)
 
