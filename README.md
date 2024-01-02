@@ -1,6 +1,6 @@
 ## BERT implemented with Invariant Risk Minimization 
 
-(code is trimmed down from https://github.com/technion-cs-nlp/irm-for-nli)
+(code is trimmed down from https://github.com/technion-cs-nlp/irm-for-nli for a different experiment)
 
 `dataet_utils.py` allows injecting artificial bias symbolized by special tokens. The default setting will not inject any synthetic noise.
 
