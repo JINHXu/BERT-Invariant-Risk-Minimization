@@ -14,4 +14,4 @@
 
 adjust hyperparameters and IRM penalty weight as needed.
 
-set `--reg 7500` to run erm
+set `--reg 0` to run erm
